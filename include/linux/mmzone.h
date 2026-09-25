@@ -17,7 +17,6 @@
 #include <linux/pageblock-flags.h>
 #include <linux/page-flags-layout.h>
 #include <linux/atomic.h>
-#include <linux/kfifo.h>
 #include <asm/page.h>
 
 /* Free memory management - zoned buddy allocator.  */
@@ -608,6 +607,7 @@ extern struct page *mem_map;
  * per-zone basis.
  */
 struct bootmem_data;
+#include <linux/kfifo.h>
 typedef struct pglist_data {
 	struct zone node_zones[MAX_NR_ZONES];
 	struct zonelist node_zonelists[MAX_ZONELISTS];
