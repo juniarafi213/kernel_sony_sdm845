@@ -244,13 +244,13 @@ static bool swap_sched_async_compress(struct page *page)
 		return false;
 
 	pgdat = NODE_DATA(page_to_nid(page));
-	if (unlikely(!pgdat || !pgdat->kcompressd))
+	if (unlikely(!pgdat || !pgdat->kcompressd || !pgdat->kcompress_fifo))
 		return false;
 
 	sis = page_swap_info(page);
 	if (sis && (sis->flags & SWP_WRITEOK)) {
-		if (kfifo_avail(&pgdat->kcompress_fifo) >= sizeof(page) &&
-		    kfifo_in(&pgdat->kcompress_fifo, &page, sizeof(page))) {
+		if (kfifo_avail(pgdat->kcompress_fifo) >= sizeof(page) &&
+		    kfifo_in(pgdat->kcompress_fifo, &page, sizeof(page))) {
 			wake_up_interruptible(&pgdat->kcompressd_wait);
 			return true;
 		}
@@ -308,11 +308,11 @@ int kcompressd(void *p)
 
 	while (!kthread_should_stop()) {
 		wait_event_interruptible(pgdat->kcompressd_wait,
-				!kfifo_is_empty(&pgdat->kcompress_fifo) ||
+				(pgdat->kcompress_fifo && !kfifo_is_empty(pgdat->kcompress_fifo)) ||
 				kthread_should_stop());
 
-		while (!kfifo_is_empty(&pgdat->kcompress_fifo)) {
-			if (kfifo_out(&pgdat->kcompress_fifo, &page, sizeof(page))) {
+		while (pgdat->kcompress_fifo && !kfifo_is_empty(pgdat->kcompress_fifo)) {
+			if (kfifo_out(pgdat->kcompress_fifo, &page, sizeof(page))) {
 				__swap_writepage(page, &wbc, end_swap_bio_write);
 				cond_resched();
 			}

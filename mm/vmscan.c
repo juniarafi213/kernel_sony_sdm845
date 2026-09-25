@@ -3731,11 +3731,17 @@ int kswapd_run(int nid)
 		return ret;
 	}
 
-	ret = kfifo_alloc(&pgdat->kcompress_fifo,
+	pgdat->kcompress_fifo = kzalloc(sizeof(*pgdat->kcompress_fifo), GFP_KERNEL);
+	if (!pgdat->kcompress_fifo)
+		return -ENOMEM;
+
+	ret = kfifo_alloc(pgdat->kcompress_fifo,
 			KCOMPRESS_FIFO_SIZE * sizeof(struct page *),
 			GFP_KERNEL);
 	if (ret) {
 		pr_err("%s: fail to kfifo_alloc\n", __func__);
+		kfree(pgdat->kcompress_fifo);
+		pgdat->kcompress_fifo = NULL;
 		return ret;
 	}
 
@@ -3745,7 +3751,9 @@ int kswapd_run(int nid)
 		pr_err("Failed to start kcompressd on node %d, ret=%ld\n",
 				nid, PTR_ERR(pgdat->kcompressd));
 		pgdat->kcompressd = NULL;
-		kfifo_free(&pgdat->kcompress_fifo);
+		kfifo_free(pgdat->kcompress_fifo);
+		kfree(pgdat->kcompress_fifo);
+		pgdat->kcompress_fifo = NULL;
 	} else {
 		wake_up_process(pgdat->kcompressd);
 	}
@@ -3770,7 +3778,11 @@ void kswapd_stop(int nid)
 	if (pgdat->kcompressd) {
 		kthread_stop(pgdat->kcompressd);
 		pgdat->kcompressd = NULL;
-		kfifo_free(&pgdat->kcompress_fifo);
+	}
+	if (pgdat->kcompress_fifo) {
+		kfifo_free(pgdat->kcompress_fifo);
+		kfree(pgdat->kcompress_fifo);
+		pgdat->kcompress_fifo = NULL;
 	}
 }
 
