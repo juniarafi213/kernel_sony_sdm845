@@ -311,6 +311,8 @@ int kcompressd(void *p)
 				(pgdat->kcompress_fifo && !kfifo_is_empty(pgdat->kcompress_fifo)) ||
 				kthread_should_stop());
 
+		try_to_freeze();
+
 		while (pgdat->kcompress_fifo && !kfifo_is_empty(pgdat->kcompress_fifo)) {
 			if (kfifo_out(pgdat->kcompress_fifo, &page, sizeof(page))) {
 				__swap_writepage(page, &wbc, end_swap_bio_write);
