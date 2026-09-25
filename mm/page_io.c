@@ -25,6 +25,7 @@
 #include <linux/uio.h>
 #include <linux/kthread.h>
 #include <linux/kfifo.h>
+#include <linux/freezer.h>
 #include <asm/pgtable.h>
 
 static struct bio *get_swap_bio(gfp_t gfp_flags,
@@ -302,6 +303,9 @@ int kcompressd(void *p)
 		.for_reclaim = 1,
 	};
 
+	current->flags |= PF_MEMALLOC | PF_SWAPWRITE;
+	set_freezable();
+
 	while (!kthread_should_stop()) {
 		wait_event_interruptible(pgdat->kcompressd_wait,
 				!kfifo_is_empty(&pgdat->kcompress_fifo) ||
@@ -310,6 +314,7 @@ int kcompressd(void *p)
 		while (!kfifo_is_empty(&pgdat->kcompress_fifo)) {
 			if (kfifo_out(&pgdat->kcompress_fifo, &page, sizeof(page))) {
 				__swap_writepage(page, &wbc, end_swap_bio_write);
+				cond_resched();
 			}
 		}
 	}

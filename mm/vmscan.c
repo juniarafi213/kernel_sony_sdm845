@@ -3728,6 +3728,7 @@ int kswapd_run(int nid)
 		pr_err("Failed to start kswapd on node %d\n", nid);
 		ret = PTR_ERR(pgdat->kswapd);
 		pgdat->kswapd = NULL;
+		return ret;
 	}
 
 	ret = kfifo_alloc(&pgdat->kcompress_fifo,
