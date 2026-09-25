@@ -433,6 +433,7 @@ extern int swp_swapcount(swp_entry_t entry);
 extern struct swap_info_struct *page_swap_info(struct page *);
 extern bool reuse_swap_page(struct page *, int *);
 extern int try_to_free_swap(struct page *);
+extern int kcompressd(void *p);
 struct backing_dev_info;
 
 #else /* CONFIG_SWAP */
@@ -593,6 +594,11 @@ static inline long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg)
 static inline bool mem_cgroup_swap_full(struct page *page)
 {
 	return vm_swap_full(page_swap_info(page));
+}
+
+static inline int kcompressd(void *p)
+{
+	return 0;
 }
 #endif
 

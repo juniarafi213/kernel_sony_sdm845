@@ -23,6 +23,8 @@
 #include <linux/blkdev.h>
 #include <linux/psi.h>
 #include <linux/uio.h>
+#include <linux/kthread.h>
+#include <linux/kfifo.h>
 #include <asm/pgtable.h>
 
 static struct bio *get_swap_bio(gfp_t gfp_flags,
@@ -229,6 +231,33 @@ bad_bmap:
 	goto out;
 }
 
+static bool swap_sched_async_compress(struct page *page)
+{
+	struct swap_info_struct *sis;
+	pg_data_t *pgdat;
+
+	if (!PageAnon(page))
+		return false;
+
+	if (!current_is_kswapd())
+		return false;
+
+	pgdat = NODE_DATA(page_to_nid(page));
+	if (unlikely(!pgdat || !pgdat->kcompressd))
+		return false;
+
+	sis = page_swap_info(page);
+	if (sis && (sis->flags & SWP_WRITEOK)) {
+		if (kfifo_avail(&pgdat->kcompress_fifo) >= sizeof(page) &&
+		    kfifo_in(&pgdat->kcompress_fifo, &page, sizeof(page))) {
+			wake_up_interruptible(&pgdat->kcompressd_wait);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 /*
  * We may have stale swap cache pages in memory: notice
  * them here and get rid of the unnecessary final write.
@@ -247,9 +276,44 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 		end_page_writeback(page);
 		goto out;
 	}
+
+	/*
+	 * Compression within zswap and zram might block rmap, unmap
+	 * of both file and anon pages, try to do compression async
+	 * if possible
+	 */
+	if (swap_sched_async_compress(page))
+		return 0;
+
 	ret = __swap_writepage(page, wbc, end_swap_bio_write);
 out:
 	return ret;
+}
+
+int kcompressd(void *p)
+{
+	pg_data_t *pgdat = (pg_data_t *)p;
+	struct page *page;
+	struct writeback_control wbc = {
+		.sync_mode = WB_SYNC_NONE,
+		.nr_to_write = SWAP_CLUSTER_MAX,
+		.range_start = 0,
+		.range_end = LLONG_MAX,
+		.for_reclaim = 1,
+	};
+
+	while (!kthread_should_stop()) {
+		wait_event_interruptible(pgdat->kcompressd_wait,
+				!kfifo_is_empty(&pgdat->kcompress_fifo) ||
+				kthread_should_stop());
+
+		while (!kfifo_is_empty(&pgdat->kcompress_fifo)) {
+			if (kfifo_out(&pgdat->kcompress_fifo, &page, sizeof(page))) {
+				__swap_writepage(page, &wbc, end_swap_bio_write);
+			}
+		}
+	}
+	return 0;
 }
 
 int __swap_writepage(struct page *page, struct writeback_control *wbc,
