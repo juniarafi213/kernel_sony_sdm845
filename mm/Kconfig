@@ -675,6 +675,100 @@ config BALANCE_ANON_FILE_RECLAIM
 	  Swapping anonymous pages out to memory can be efficient enough to justify
 	  treating anonymous and file backed pages equally.
 
+config WORKINGSET_PROTECTION
+	bool "sysctl knobs for protecting the working set"
+	depends on SYSCTL
+	default y
+	help
+	  The kernel does not provide a way to protect the working set under memory pressure. 
+	  A certain amount of anonymous and clean file pages is required by
+	  the userspace for normal operation. First of all, the userspace needs 
+	  a cache of shared libraries and executable binaries. If the amount of the
+	  clean file pages falls below a certain level, then thrashing and even
+	  livelock can take place.
+
+config ANON_LOW_RATIO
+	int "Default value for vm.anon_low_ratio"
+	depends on WORKINGSET_PROTECTION
+	range 0 100
+	default 10
+	help
+	  This option sets the default value for vm.anon_low_ratio sysctl knob.
+
+	  This knob provides *best-effort* protection of anonymous pages. The anonymous pages
+	  on the current node won't be reclaimed under any conditions when their amount
+	  is below vm.anon_low_ratio *unless* we threaten to OOM.
+	  
+	  Unlike vm.anon_min_ratio, this parameter does not provide strict protection.
+	  When the system approaches an out-of-memory condition, the kernel may still
+	  reclaim anonymous pages even if their amount is below vm.anon_low_ratio.
+	  
+	  Setting this value too high (close to 100) can result in earlier reclaim of 
+	  file-backed pages and increased pressure on the page cache.
+
+config ANON_MIN_RATIO
+	int "Default value for vm.anon_min_ratio"
+	depends on WORKINGSET_PROTECTION
+	range 0 100
+	default 5
+	help
+	  This option sets the default value for vm.anon_min_ratio sysctl knob.
+
+	  The vm.anon_min_ratio sysctl knob provides *hard* protection of
+	  anonymous pages. The anonymous pages on the current node won't be
+	  reclaimed under any conditions when their amount is below
+	  vm.anon_min_ratio. This knob may be used to prevent excessive swap
+	  thrashing when anonymous memory is low (for example, when memory is
+	  going to be overfilled by compressed data of zram module).
+
+	  Setting this value too high (close to MemTotal) can result in
+	  inability to swap and can lead to early OOM under memory pressure.
+
+config CLEAN_LOW_RATIO
+	int "Default value for vm.clean_low_ratio"
+	depends on WORKINGSET_PROTECTION
+	range 0 100
+	default 10
+	help
+	  This option sets the default value for vm.clean_low_ratio sysctl knob.
+
+	  The vm.clean_low_ratio sysctl knob provides *best-effort*
+	  protection of clean file pages. The file pages on the current node
+	  won't be reclaimed under memory pressure when the amount of clean file
+	  pages is below vm.clean_low_ratio *unless* we threaten to OOM.
+	  Protection of clean file pages using this knob may be used when
+	  swapping is still possible to
+	    - prevent disk I/O thrashing under memory pressure;
+	    - improve performance in disk cache-bound tasks under memory
+	      pressure.
+
+	  Setting it to a high value may result in a early eviction of anonymous
+	  pages into the swap space by attempting to hold the protected amount
+	  of clean file pages in memory.
+
+config CLEAN_MIN_RATIO
+	int "Default value for vm.clean_min_ratio"
+	depends on WORKINGSET_PROTECTION
+	range 0 100
+	default 5
+	help
+	  This option sets the default value for vm.clean_min_ratio sysctl knob.
+
+	  The vm.clean_min_ratio sysctl knob provides *hard* protection of
+	  clean file pages. The file pages on the current node won't be
+	  reclaimed under memory pressure when the amount of clean file pages is
+	  below vm.clean_min_ratio. Hard protection of clean file pages using
+	  this knob may be used to
+	    - prevent disk I/O thrashing under memory pressure even with no free
+	      swap space;
+	    - improve performance in disk cache-bound tasks under memory
+	      pressure;
+	    - avoid high latency and prevent livelock in near-OOM conditions.
+
+	  Setting it to a high value may result in a early out-of-memory condition
+	  due to the inability to reclaim the protected amount of clean file pages
+	  when other types of pages cannot be reclaimed.
+
 # For architectures that support deferred memory initialisation
 config ARCH_SUPPORTS_DEFERRED_STRUCT_PAGE_INIT
 	bool
