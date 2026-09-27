@@ -96,6 +96,8 @@ enum print_reason {
 #define DC_OV_BY_OTG_VOTER		"DC_OV_BY_OTG_VOTER"
 #endif
 
+#define BYPASS_VOTER			"BYPASS_VOTER"
+
 #define VCONN_MAX_ATTEMPTS	3
 #define OTG_MAX_ATTEMPTS	3
 #define BOOST_BACK_STORM_COUNT	3
