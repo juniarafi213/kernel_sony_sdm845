@@ -50,6 +50,21 @@
 #define FAS_QUANT_STEP_SHIFT 2
 
 /*
+ * The hitch margin H never exceeds ref * (1 - 2^-FAS_MARGIN_CAP_SHIFT), which
+ * is 0.75 * ref by default.
+ *
+ * The quantile tracker only sees frames below ref + H. Jank that stays below
+ * that threshold is learned as noise, which raises the quantile and H until
+ * H reaches its old cap, ref. At H = ref a single missed frame slot (interval
+ * 2P) sits on the threshold, and jitter decides whether it is reported. With
+ * this cap the threshold stays below 1.75 * ref, so a missed slot is always
+ * reported. H is still at least V / 2. Use a larger shift for a higher cap.
+ */
+#ifndef FAS_MARGIN_CAP_SHIFT
+#define FAS_MARGIN_CAP_SHIFT 2
+#endif
+
+/*
  * Required count of normal frames before using adaptive quantile values.
  * Warmup needs several thousand frames to collect sufficient sample data.
  */
@@ -104,9 +119,11 @@ struct fas_cfg {
 	u8 active;
 	/** Total count of configured targets. */
 	u8 count;
+	/** Percentage of stalls that are held out of boosting (0 to 100). */
+	u8 holdout_pct;
 	/** Flag to prevent switching to lower frame rates. */
 	u8 lock_down;
-	u8 pad[5];
+	u8 pad[4];
 	/** Configured targets ordered from fastest to slowest rate. */
 	struct fas_target tgt[FAS_MAX_TARGETS];
 };
@@ -147,6 +164,8 @@ struct fas_hot {
 	u8 pending;
 	/** Consecutive window count matching pending target. */
 	u8 pending_windows;
+	/** Set to 1 while the current stall is in the holdout group. */
+	u8 holdout;
 	/** Sequence number of last event. */
 	u32 seq;
 };
@@ -204,6 +223,7 @@ static __always_inline u64 fas_ref(const struct fas_cfg *c,
  *
  * Uses tracked deviation quantile if sufficient samples exist.
  * Falls back to fixed multiple of mean absolute deviation during warmup.
+ * The result is at least V / 2 and at most 0.75 * ref (see FAS_MARGIN_CAP_SHIFT).
  *
  * @param c Configuration settings.
  * @param h Detector state.
@@ -216,8 +236,10 @@ static __always_inline u64 fas_margin(const struct fas_cfg *c,
 	u64 adaptive = h->quant_n >= FAS_QUANT_WARMUP ?
 			       h->quant_q >> FAS_Q :
 			       (h->dev_q4 * FAS_NOISE_MULT) >> 4;
+	u64 cap = max_t(u64, c->vsync >> 1, ref - (ref >> FAS_MARGIN_CAP_SHIFT));
 
-	return min_t(u64, max_t(u64, c->vsync >> 1, adaptive), ref);
+	adaptive = max_t(u64, c->vsync >> 1, adaptive);
+	return min_t(u64, min_t(u64, adaptive, cap), ref);
 }
 
 /**
@@ -248,6 +270,26 @@ static __always_inline u64 fas_hard_ticks(const struct fas_cfg *c,
 	u64 ref = fas_ref(c, h);
 
 	return ref * FAS_MISS_BIG + fas_margin(c, h, ref);
+}
+
+/**
+ * @brief Draws the holdout group of a stall.
+ *
+ * The draw hashes the timestamp of the last frame, which is fixed before the
+ * stall starts. It cannot depend on the length of the stall. Fibonacci hashing
+ * spreads the low tick bits over the high bits, and the multiply-shift maps
+ * them to 0..99 without a division.
+ *
+ * @param c Configuration settings.
+ * @param h Detector state.
+ * @return true if the stall is held out of boosting.
+ */
+static __always_inline bool fas_holdout_draw(const struct fas_cfg *c,
+					     const struct fas_hot *h)
+{
+	u32 x = (u32)((h->last * 0x9E3779B97F4A7C15ULL) >> 32);
+
+	return c->holdout_pct && (((u64)x * 100) >> 32) < c->holdout_pct;
 }
 
 /**
@@ -526,6 +568,7 @@ static noinline void fas_det_resync(struct fas_hot *h, const struct fas_cfg *c,
 		fas_emit(c, out, FAS_EVENT_RESUMED, 0, 0, 0);
 
 	h->paused = 0;
+	h->holdout = 0;
 	h->degraded = 0;
 	h->ok_windows = 0;
 	h->cusum_q = 0;
@@ -640,6 +683,9 @@ static u64 fas_det_frame(struct fas_hot *h, struct fas_cfg *c, u64 now,
 	}
 
 	flags = h->wd_stage ? FAS_EVF_WATCHDOG : 0;
+	if (unlikely(h->holdout))
+		flags |= FAS_EVF_HOLDOUT;
+	h->holdout = 0;
 	h->wd_stage = FAS_WD_ARMED;
 
 	ref = fas_ref(c, h);
@@ -686,7 +732,9 @@ static u64 fas_det_wd_fire(struct fas_hot *h, const struct fas_cfg *c, u64 now,
     	if (elapsed < limit)
         	return 0;
     	h->wd_stage = FAS_WD_SOFT_SENT;
-    	fas_emit(c, out, FAS_EVENT_BOOST_SOFT, 0, 0, elapsed);
+		h->holdout = fas_holdout_draw(c, h);
+		fas_emit(c, out, FAS_EVENT_BOOST_SOFT,
+			 h->holdout ? FAS_EVF_HOLDOUT : 0, 0, elapsed);
     	limit = fas_hard_ticks(c, h);
     	return limit > elapsed ? limit - elapsed : 1;
 	case FAS_WD_SOFT_SENT:
@@ -694,7 +742,8 @@ static u64 fas_det_wd_fire(struct fas_hot *h, const struct fas_cfg *c, u64 now,
 		if (elapsed < limit)
 			return limit - elapsed;
 		h->wd_stage = FAS_WD_HARD_SENT;
-		fas_emit(c, out, FAS_EVENT_BOOST_HARD, 0, 0, elapsed);
+		fas_emit(c, out, FAS_EVENT_BOOST_HARD,
+			 h->holdout ? FAS_EVF_HOLDOUT : 0, 0, elapsed);
 		return c->pause > elapsed ? c->pause - elapsed : 1;
 	case FAS_WD_HARD_SENT:
 		if (elapsed < c->pause)

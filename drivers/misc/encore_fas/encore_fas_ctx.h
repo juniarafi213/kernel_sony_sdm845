@@ -12,6 +12,7 @@ int fas_ctx_register(struct fas_register_args *req);
 int fas_ctx_remove(s32 ctx_id);
 int fas_ctx_set_config(s32 ctx_id, const struct fas_config *cfg);
 int fas_ctx_get_state(struct fas_state *state);
+int fas_ctx_get_stats(struct fas_stats *st);
 void fas_ctx_list(struct fas_listener_list *list);
 
 #endif

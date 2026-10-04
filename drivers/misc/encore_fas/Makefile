@@ -31,4 +31,4 @@ ifneq ($(shell cat $(srctree)/include/linux/hrtimer*.h 2>/dev/null | grep -qs HR
 ccflags-y += -DFAS_HAVE_HRTIMER_SOFT
 endif
 
-ccflags-y += -DFAS_VERSION=1 -DFAS_BRANCH=\"main\"
+ccflags-y += -DFAS_VERSION=8 -DFAS_BRANCH=\"main\"

@@ -68,6 +68,21 @@ static long fas_ioctl_get_state(void __user *uarg)
 	return copy_to_user(uarg, &state, sizeof(state)) ? -EFAULT : 0;
 }
 
+static long fas_ioctl_get_stats(void __user *uarg)
+{
+	struct fas_stats st;
+	long ret;
+
+	if (copy_from_user(&st, uarg, sizeof(st)))
+		return -EFAULT;
+
+	ret = fas_ctx_get_stats(&st);
+	if (ret)
+		return ret;
+
+	return copy_to_user(uarg, &st, sizeof(st)) ? -EFAULT : 0;
+}
+
 /**
  * @brief Handles ioctl control commands. Restricted to root callers.
  *
@@ -114,6 +129,8 @@ static long fas_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 	case FAS_IOC_GET_STATE:
 		return fas_ioctl_get_state(uarg);
+	case FAS_IOC_GET_STATS:
+		return fas_ioctl_get_stats(uarg);
 	case FAS_IOC_LIST: {
 		struct fas_listener_list list;
 
