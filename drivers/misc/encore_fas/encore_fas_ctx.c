@@ -20,6 +20,7 @@
 #include "encore_fas_ctx.h"
 #include "encore_fas_det.h"
 #include "encore_fas_evq.h"
+#include "encore_fas_stats.h"
 #include "encore_fas_time.h"
 
 struct fas_ctx {
@@ -33,6 +34,9 @@ struct fas_ctx {
 	u32 id ____cacheline_aligned;
 	/** Detector settings. */
 	struct fas_cfg cfg;
+
+	/** Frame interval histogram. Guarded by @lock. */
+	struct fas_hist hist ____cacheline_aligned;
 
 	struct hrtimer wd ____cacheline_aligned;
 	/** Uprobe consumer structure. */
@@ -75,6 +79,13 @@ static bool fas_ctx_alive(const struct fas_ctx *ctx)
 	return alive;
 }
 
+/*
+ * Maximum timer slack of the watchdog. The soft boost is due about 29 to 33 ms
+ */
+#ifndef FAS_TIMER_SLACK_NS
+#define FAS_TIMER_SLACK_NS 100000ULL
+#endif
+
 /**
  * @brief Starts watchdog timer.
  *
@@ -85,7 +96,8 @@ static void fas_ctx_arm(struct fas_ctx *ctx, u64 ticks)
 {
 	u64 ns = fas_ticks_to_ns(ticks);
 
-	hrtimer_start_range_ns(&ctx->wd, ns_to_ktime(ns), ns >> 4,
+	hrtimer_start_range_ns(&ctx->wd, ns_to_ktime(ns),
+			       min_t(u64, ns >> 4, FAS_TIMER_SLACK_NS),
 			       FAS_TIMER_MODE);
 }
 
@@ -129,13 +141,20 @@ static int fas_uprobe_handler(FAS_UPROBE_HANDLER_ARGS)
 	struct fas_ctx *ctx = container_of(uc, struct fas_ctx, uc);
 	struct fas_out out;
 	unsigned long flags;
-	u64 delay;
+	u64 delay, now, prev;
+	bool had;
 
 	if (unlikely(current->tgid != ctx->tgid))
 		return 0;
 
 	raw_spin_lock_irqsave(&ctx->lock, flags);
-	delay = fas_det_frame(&ctx->hot, &ctx->cfg, fas_ticks(), &out);
+	now = fas_ticks();
+	prev = ctx->hot.last;
+	had = ctx->hot.have_last;
+	delay = fas_det_frame(&ctx->hot, &ctx->cfg, now, &out);
+	/* The detector ignores a frame that arrives out of order. So does this. */
+	if (likely(had && (s64)(now - prev) > 0))
+		fas_hist_add(&ctx->hist, now - prev);
 	if (unlikely(out.n))
 		fas_ctx_publish(ctx, &out);
 	if (delay)
@@ -239,12 +258,16 @@ static int fas_cfg_build(struct fas_cfg *c, struct fas_hot *h,
 			 const struct fas_config *cfg)
 {
 	u64 vsync = cfg->vsync_ns ? fas_ns_to_ticks(cfg->vsync_ns) : 0;
+	int ret;
 
-	if (cfg->flags & ~FAS_CFG_LOCK_DOWN)
+	if ((cfg->flags & ~FAS_CFG_LOCK_DOWN) || cfg->holdout_pct > 100)
 		return -EINVAL;
 
-	return fas_det_setup(c, h, fas_clk.freq, cfg->fps, cfg->count, vsync,
-			     cfg->flags & FAS_CFG_LOCK_DOWN);
+	ret = fas_det_setup(c, h, fas_clk.freq, cfg->fps, cfg->count, vsync,
+			    cfg->flags & FAS_CFG_LOCK_DOWN);
+	if (!ret)
+		c->holdout_pct = (u8)cfg->holdout_pct;
+	return ret;
 }
 
 /**
@@ -257,6 +280,7 @@ void fas_ctx_init(void)
 	BUILD_BUG_ON(sizeof(struct fas_register_args) != 320);
 	BUILD_BUG_ON(sizeof(struct fas_config) != 48);
 	BUILD_BUG_ON(sizeof(struct fas_hot) != 72);
+	BUILD_BUG_ON(sizeof(struct fas_stats) != 592);
 #if L1_CACHE_BYTES == 64 && !defined(CONFIG_DEBUG_SPINLOCK) && \
 	!defined(CONFIG_LOCKDEP)
 	BUILD_BUG_ON(offsetof(struct fas_ctx, id) != 2 * L1_CACHE_BYTES);
@@ -341,6 +365,7 @@ int fas_ctx_register(struct fas_register_args *req)
 		goto err_path;
 	}
 
+	fas_hist_init(&ctx->hist, fas_clk.freq);
 	raw_spin_lock_init(&ctx->lock);
 	ctx->tgid = tgid;
 	ctx->pid = pid;
@@ -464,6 +489,55 @@ int fas_ctx_get_state(struct fas_state *state)
 	mutex_unlock(&fas_mutex);
 
 	state->dropped = fas_evq_dropped();
+	return 0;
+}
+
+/**
+ * @brief Reads detector internals and the interval histogram of a listener.
+ *
+ * @param st In/out statistics structure. Caller sets ctx_id and flags.
+ * @return 0 on success, -EINVAL for unknown flags, or -ENOENT if not found.
+ */
+int fas_ctx_get_stats(struct fas_stats *st)
+{
+	struct fas_ctx *ctx;
+	unsigned long flags;
+	u64 ref, margin;
+	s32 id = st->ctx_id;
+	u32 req = st->flags;
+
+	if (req & ~FAS_STATS_CLEAR)
+		return -EINVAL;
+
+	memset(st, 0, sizeof(*st));
+	st->ctx_id = id;
+	st->hist_bin_ns = FAS_HIST_BIN_NS;
+
+	mutex_lock(&fas_mutex);
+	ctx = fas_ctx_find(id);
+	if (!ctx) {
+		mutex_unlock(&fas_mutex);
+		return -ENOENT;
+	}
+
+	raw_spin_lock_irqsave(&ctx->lock, flags);
+	ref = fas_ref(&ctx->cfg, &ctx->hot);
+	margin = fas_margin(&ctx->cfg, &ctx->hot, ref);
+	st->fps = ctx->cfg.tgt[ctx->cfg.active].fps;
+	st->cadence_ns = fas_ticks_to_ns(ctx->hot.cadence_q4 >> 4);
+	st->dev_ns = fas_ticks_to_ns(ctx->hot.dev_q4 >> 4);
+	st->quant_ns = fas_ticks_to_ns(ctx->hot.quant_q >> FAS_Q);
+	st->ref_ns = fas_ticks_to_ns(ref);
+	st->margin_ns = fas_ticks_to_ns(margin);
+	st->hitch_ns = fas_ticks_to_ns(ref + margin);
+	st->quant_n = ctx->hot.quant_n;
+	st->frames = ctx->hist.frames;
+	memcpy(st->hist, ctx->hist.bin, sizeof(st->hist));
+	if (req & FAS_STATS_CLEAR)
+		fas_hist_clear(&ctx->hist);
+	raw_spin_unlock_irqrestore(&ctx->lock, flags);
+	mutex_unlock(&fas_mutex);
+
 	return 0;
 }
 
