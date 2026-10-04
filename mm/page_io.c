@@ -307,11 +307,9 @@ int kcompressd(void *p)
 	set_freezable();
 
 	while (!kthread_should_stop()) {
-		wait_event_interruptible(pgdat->kcompressd_wait,
+		wait_event_freezable(pgdat->kcompressd_wait,
 				(pgdat->kcompress_fifo && !kfifo_is_empty(pgdat->kcompress_fifo)) ||
 				kthread_should_stop());
-
-		try_to_freeze();
 
 		while (pgdat->kcompress_fifo && !kfifo_is_empty(pgdat->kcompress_fifo)) {
 			if (kfifo_out(pgdat->kcompress_fifo, &page, sizeof(page))) {
@@ -319,6 +317,8 @@ int kcompressd(void *p)
 				cond_resched();
 			}
 		}
+
+		try_to_freeze();
 	}
 	return 0;
 }
