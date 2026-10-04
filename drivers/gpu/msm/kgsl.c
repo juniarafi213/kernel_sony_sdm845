@@ -874,6 +874,7 @@ static void kgsl_destroy_process_private(struct kref *kref)
 			struct kgsl_process_private, refcount);
 
 	put_pid(private->pid);
+	mmdrop(private->mm);
 	idr_destroy(&private->mem_idr);
 	idr_destroy(&private->syncsource_idr);
 
@@ -945,6 +946,8 @@ static struct kgsl_process_private *kgsl_process_private_new(
 	kref_init(&private->refcount);
 
 	private->pid = cur_pid;
+	private->mm = current->mm;
+	atomic_inc(&current->mm->mm_count);
 	get_task_comm(private->comm, current->group_leader);
 
 	spin_lock_init(&private->mem_lock);
@@ -963,6 +966,7 @@ static struct kgsl_process_private *kgsl_process_private_new(
 		idr_destroy(&private->mem_idr);
 		idr_destroy(&private->syncsource_idr);
 		put_pid(private->pid);
+		mmdrop(private->mm);
 
 		kfree(private);
 		private = ERR_PTR(err);
@@ -4451,24 +4455,28 @@ static unsigned long _search_range(struct kgsl_process_private *private,
 	return result;
 }
 
+unsigned long kgsl_get_align(struct kgsl_memdesc *memdesc)
+{
+	u32 bit = kgsl_memdesc_get_align(memdesc);
+
+	if (bit >= ilog2(SZ_2M))
+		return SZ_2M;
+	else if (bit >= ilog2(SZ_1M))
+		return SZ_1M;
+	else if (bit >= ilog2(SZ_64K))
+		return SZ_64K;
+
+	return PAGE_SIZE;
+}
+
 static unsigned long _get_svm_area(struct kgsl_process_private *private,
 		struct kgsl_mem_entry *entry, unsigned long hint,
 		unsigned long len, unsigned long flags)
 {
 	uint64_t start, end;
-	int align_shift = kgsl_memdesc_get_align(&entry->memdesc);
-	uint64_t align;
+	unsigned long align = kgsl_get_align(&entry->memdesc);
 	unsigned long result;
 	unsigned long addr;
-
-	if (align_shift >= ilog2(SZ_2M))
-		align = SZ_2M;
-	else if (align_shift >= ilog2(SZ_1M))
-		align = SZ_1M;
-	else if (align_shift >= ilog2(SZ_64K))
-		align = SZ_64K;
-	else
-		align = SZ_4K;
 
 	/* get the GPU pagetable's SVM range */
 	if (kgsl_mmu_svm_range(private->pagetable, &start, &end,
@@ -4574,6 +4582,9 @@ static int kgsl_mmap(struct file *file, struct vm_area_struct *vma)
 	struct kgsl_process_private *private = dev_priv->process_priv;
 	struct kgsl_mem_entry *entry = NULL;
 	struct kgsl_device *device = dev_priv->device;
+
+	if (vma->vm_mm != private->mm)
+		return -EACCES;
 
 	/* Handle leagacy behavior for memstore */
 
