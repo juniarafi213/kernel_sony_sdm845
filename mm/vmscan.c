@@ -39,7 +39,6 @@
 #include <linux/rwsem.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
-#include <linux/kfifo.h>
 #include <linux/freezer.h>
 #include <linux/memcontrol.h>
 #include <linux/delayacct.h>
@@ -3898,34 +3897,6 @@ int kswapd_run(int nid)
 		pr_err("Failed to start kswapd on node %d\n", nid);
 		ret = PTR_ERR(pgdat->kswapd);
 		pgdat->kswapd = NULL;
-		return ret;
-	}
-
-	pgdat->kcompress_fifo = kzalloc(sizeof(*pgdat->kcompress_fifo), GFP_KERNEL);
-	if (!pgdat->kcompress_fifo)
-		return -ENOMEM;
-
-	ret = kfifo_alloc(pgdat->kcompress_fifo,
-			KCOMPRESS_FIFO_SIZE * sizeof(struct page *),
-			GFP_KERNEL);
-	if (ret) {
-		pr_err("%s: fail to kfifo_alloc\n", __func__);
-		kfree(pgdat->kcompress_fifo);
-		pgdat->kcompress_fifo = NULL;
-		return ret;
-	}
-
-	pgdat->kcompressd = kthread_create_on_node(kcompressd, pgdat, nid,
-			"kcompressd%d", nid);
-	if (IS_ERR(pgdat->kcompressd)) {
-		pr_err("Failed to start kcompressd on node %d, ret=%ld\n",
-				nid, PTR_ERR(pgdat->kcompressd));
-		pgdat->kcompressd = NULL;
-		kfifo_free(pgdat->kcompress_fifo);
-		kfree(pgdat->kcompress_fifo);
-		pgdat->kcompress_fifo = NULL;
-	} else {
-		wake_up_process(pgdat->kcompressd);
 	}
 
 	return ret;
@@ -3937,22 +3908,11 @@ int kswapd_run(int nid)
  */
 void kswapd_stop(int nid)
 {
-	pg_data_t *pgdat = NODE_DATA(nid);
-	struct task_struct *kswapd = pgdat->kswapd;
+	struct task_struct *kswapd = NODE_DATA(nid)->kswapd;
 
 	if (kswapd) {
 		kthread_stop(kswapd);
-		pgdat->kswapd = NULL;
-	}
-
-	if (pgdat->kcompressd) {
-		kthread_stop(pgdat->kcompressd);
-		pgdat->kcompressd = NULL;
-	}
-	if (pgdat->kcompress_fifo) {
-		kfifo_free(pgdat->kcompress_fifo);
-		kfree(pgdat->kcompress_fifo);
-		pgdat->kcompress_fifo = NULL;
+		NODE_DATA(nid)->kswapd = NULL;
 	}
 }
 
