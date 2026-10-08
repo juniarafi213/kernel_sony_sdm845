@@ -46,7 +46,7 @@ static long cam_cci_subdev_ioctl(struct v4l2_subdev *sd,
 
 	switch (cmd) {
 	case VIDIOC_MSM_CCI_CFG:
-		rc = -EOPNOTSUPP;
+		rc = cam_cci_core_cfg(sd, arg);
 		break;
 	case VIDIOC_CAM_CONTROL:
 		break;
